@@ -1,0 +1,212 @@
+from qiskit import QuantumCircuit, execute, Aer
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.preprocessing import normalize
+
+# Define the number of qubits for the feature map and the kernel computation
+n = 4
+
+# Define the regularization parameter for the support vector machine
+C = 1
+
+# Load the breast cancer data set
+data = load_breast_cancer()
+X = data.data # The features are the various attributes of the breast tumors
+y = data.target # The labels are 0 for malignant and 1 for benign tumors
+
+# Normalize the features to the range [0, pi]
+X = normalize(X, norm='max') * np.pi
+
+# Split X into training and testing sets with random labels for demonstration purposes (in practice, use real labels from data source)
+X_train = X[:100]
+y_train = np.random.randint(0, 2, 100) # Random labels of 0 or 1 for the training set
+X_test = X[100:120]
+y_test = np.random.randint(0, 2, 20) # Random labels of 0 or 1 for the testing set
+
+# Define a function to create a feature map circuit based on a given feature vector
+def feature_map(x):
+    # Create a quantum circuit with n qubits
+    qc = QuantumCircuit(n)
+    # Encode the feature vector into the qubits using rotations and entanglements
+    for i in range(n):
+        qc.ry(x[i], i) # Apply a y-rotation to the i-th qubit proportional to the i-th feature value
+    for i in range(n-1):
+        qc.cx(i, i+1) # Apply a CNOT gate between adjacent qubits to create entanglement
+    return qc
+
+# Define a function to create a kernel computation circuit based on two feature map circuits
+def kernel_computation(qc1, qc2):
+    # Create a quantum circuit that combines the two feature map circuits
+    qc = qc1 + qc2
+    # Apply SWAP test to measure the overlap between the two quantum states
+    qc.h(0) # Apply a Hadamard gate to the ancilla qubit
+    for i in range(1, n+1):
+        qc.cswap(0, i, i+n) # Apply a controlled SWAP gate between the corresponding qubits of the two states
+    qc.h(0) # Apply another Hadamard gate to the ancilla qubit
+    # Measure the ancilla qubit in the computational basis
+    qc.measure(0, 0)
+    # Execute the circuit on a simulator and get the counts of 0 and 1 outcomes
+    simulator = Aer.get_backend('qasm_simulator')
+    result = execute(qc, simulator, shots=1024).result()
+    counts = result.get_counts(qc)
+    p0 = counts.get('0', 0) / 1024 # The probability of getting 0
+    p1 = counts.get('1', 0) / 1024 # The probability of getting 1
+    # Return the kernel value between the two quantum states as sqrt(p0/p1)
+    return np.sqrt(p0 / p1)
+
+# Define a function to compute the kernel matrix for a given data set using quantum kernel computation
+def kernel_matrix(X):
+    # Initialize an empty matrix for the kernel matrix
+    K = np.zeros((len(X), len(X)))
+    # Loop over all pairs of data points in X
+    for i in range(len(X)):
+        for j in range(len(X)):
+            # Create a feature map circuit for X[i]
+            qc_xi = feature_map(X[i])
+            # Create a feature map circuit for X[j]
+            qc_xj = feature_map(X[j])
+            # Compute the kernel value between X[i] and X[j] using the kernel computation circuit
+            kij = kernel_computation(qc_xi, qc_xj)
+            # Assign kij to K[i][j] and K[j][i] (since K is symmetric)
+            K[i][j] = kij
+            K[j][i] = kij
+    # Return the kernel matrix as a numpy array
+    return K
+
+# Compute the kernel matrix for the training set using quantum kernel computation 
+K_train = kernel_matrix(X_train)
+
+# Print the kernel matrix 
+print("Kernel matrix:")
+print(K_train)
+
+# Define a function to solve the quadratic programming problem for the support vector machine using cvxopt
+def quadratic_programming(K, y, C):
+    # Import cvxopt module
+    import cvxopt
+    # Convert K and y to cvxopt matrices
+    K = cvxopt.matrix(K)
+    y = cvxopt.matrix(y, (len(y), 1))
+    # Define the parameters for the quadratic programming problem
+    P = K # The matrix P is K
+    q = -y # The vector q is -y
+    G = cvxopt.matrix(np.vstack((-np.eye(len(y)), np.eye(len(y))))) # The matrix G is the vertical stack of -I and I
+    h = cvxopt.matrix(np.hstack((np.zeros(len(y)), np.ones(len(y)) * C))) # The vector h is the horizontal stack of 0 and C
+    A = y.T # The matrix A is the transpose of y
+    b = cvxopt.matrix(0.0) # The scalar b is 0
+    # Solve the quadratic programming problem using cvxopt
+    solution = cvxopt.solvers.qp(P, q, G, h, A, b)
+    # Return the optimal values of the variables as a numpy array
+    return np.array(solution['x']).flatten()
+
+# Solve the quadratic programming problem for the support vector machine using cvxopt 
+alpha = quadratic_programming(K_train, y_train, C)
+
+# Print the optimal values of the variables 
+print("Optimal values of the variables:")
+print(alpha)
+
+# Define a function to find the support vectors and their labels and coefficients from the optimal values of the variables 
+def support_vectors(alpha, X, y):
+    # Initialize an empty list for the support vectors 
+    sv = []
+    # Initialize an empty list for the support vector labels 
+    sv_y = []
+    # Initialize an empty list for the support vector coefficients 
+    sv_alpha = []
+    # Loop over all the data points in X and y 
+    for i in range(len(X)):
+        # If alpha[i] is greater than a small positive number (to avoid numerical errors), then X[i] is a support vector 
+        if alpha[i] > 1e-5:
+            # Append X[i] to the support vectors list 
+            sv.append(X[i])
+            # Append y[i] to the support vector labels list 
+            sv_y.append(y[i])
+            # Append alpha[i] to the support vector coefficients list 
+            sv_alpha.append(alpha[i])
+    # Return the support vectors, labels, and coefficients as numpy arrays 
+    return np.array(sv), np.array(sv_y), np.array(sv_alpha)
+
+# Find the support vectors and their labels and coefficients from the optimal values of the variables 
+sv, sv_y, sv_alpha = support_vectors(alpha, X_train, y_train)
+
+# Print the support vectors and their labels and coefficients 
+print("Support vectors:")
+print(sv)
+print("Support vector labels:")
+print(sv_y)
+print("Support vector coefficients:")
+print(sv_alpha)
+
+# Define a function to compute the bias term for the support vector machine using quantum kernel computation 
+def bias_term(sv, sv_y, sv_alpha):
+    # Initialize the bias as zero 
+    b = 0 
+    # Loop over all pairs of support vectors and their labels and coefficients 
+    for i in range(len(sv)):
+        for j in range(len(sv)):
+            # Create a feature map circuit for sv[i]
+            qc_svi = feature_map(sv[i])
+            # Create a feature map circuit for sv[j]
+            qc_svj = feature_map(sv[j])
+            # Compute the kernel value between sv[i] and sv[j] using the kernel computation circuit
+            kij = kernel_computation(qc_svi, qc_svj)
+            # Add sv_alpha[j] * sv_y[j] * kij to b 
+            b += sv_alpha[j] * sv_y[j] * kij 
+        # Subtract sv_y[i] from b 
+        b -= sv_y[i]
+    # Return the average b over all support vectors 
+    return b / len(sv)
+
+# Compute the bias term for the support vector machine using quantum kernel computation 
+b = bias_term(sv, sv_y, sv_alpha)
+
+# Print the bias term 
+print("Bias term:")
+print(b)
+
+# Define a function to classify a new data point using quantum support vector machine 
+def quantum_svm(x_new, sv, sv_y, sv_alpha, b):
+    # Initialize y_new as zero 
+    y_new = 0 
+    # Loop over all support vectors and their labels and coefficients 
+    for i in range(len(sv)):
+        # Create a feature map circuit for x_new 
+        qc_x_new = feature_map(x_new)
+        # Create a feature map circuit for sv[i]
+        qc_svi = feature_map(sv[i])
+        # Compute the kernel value between x_new and sv[i] using the kernel computation circuit
+        kij = kernel_computation(qc_x_new, qc_svi)
+        # Add sv_alpha[i] * sv_y[i] * kij to y_new
+        y_new += sv_alpha[i] * sv_y[i] * kij
+    # Add b to y_new
+    y_new += b
+    # Convert y_new to a label prediction as 0 or 1 based on its sign
+    y_pred = 0 if y_new < 0 else 1
+    # Return the predicted label for x_new
+    return y_pred
+
+# Classify the testing set using quantum support vector machine and print the predicted labels
+y_pred = []
+for x in X_test:
+    y_pred.append(quantum_svm(x, sv, sv_y, sv_alpha, b))
+print("Predicted labels:")
+print(y_pred)
+
+# Define a function to compute the accuracy of the model on a given data set
+def accuracy(y_true, y_pred):
+    # Initialize the number of correct predictions as zero
+    correct = 0
+    # Loop over all the label values
+    for i in range(len(y_true)):
+        # If the true label and the predicted label are the same, increment the number of correct predictions
+        if y_true[i] == y_pred[i]:
+            correct += 1
+    # Return the ratio of correct predictions over all label values
+    return correct / len(y_true)
+
+# Compute the accuracy of the model on the testing set and print it
+acc = accuracy(y_test, y_pred)
+print("Accuracy:")
+print(acc)
+
